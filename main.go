@@ -24,6 +24,7 @@ var (
 	github   string
 	dir      string
 	username string
+	ssh      bool
 	quiet    bool
 )
 
@@ -40,6 +41,7 @@ func init() {
 	rootCmd.Flags().StringVarP(&github, "github", "g", "", "Load from GitHub as owner/repo[/path] (e.g. org/repo or org/repo/dir/security-insights.yml)")
 	rootCmd.Flags().StringVarP(&dir, "output", "", "", "Target directory for cloned repositories")
 	rootCmd.Flags().StringVarP(&username, "username", "u", "", "Fork username; clone with remote upstream and add your fork as origin")
+	rootCmd.Flags().BoolVar(&ssh, "ssh", false, "Use SSH URLs for clone and remotes (default: HTTPS)")
 	rootCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Suppress git output")
 }
 
@@ -85,11 +87,15 @@ func run(cmd *cobra.Command, args []string) error {
 	usedNames := make(map[string]bool)
 	for _, r := range insights.Project.Repositories {
 		repoURL := string(r.Url)
+		effectiveURL, err := normalizeRepoURL(repoURL, ssh)
+		if err != nil {
+			return fmt.Errorf("repo %s: %w", repoURL, err)
+		}
 		dirName := repoDirName(r, repoURL, usedNames)
 		usedNames[dirName] = true
 		targetPath := filepath.Join(dir, dirName)
 
-		if err := cloneOrPull(targetPath, repoURL, username); err != nil {
+		if err := cloneOrPull(targetPath, effectiveURL, username); err != nil {
 			return fmt.Errorf("git failed for %s: %w", dirName, err)
 		}
 	}
@@ -143,6 +149,86 @@ func lastPathComponent(url string) string {
 		return url[i+1:]
 	}
 	return url
+}
+
+// normalizeRepoURL returns the repo URL in SSH or HTTPS form depending on useSSH.
+func normalizeRepoURL(repoURL string, useSSH bool) (string, error) {
+	if useSSH {
+		return repoURLToSSH(repoURL)
+	}
+	return repoURLToHTTPS(repoURL)
+}
+
+func repoURLToSSH(repoURL string) (string, error) {
+	repoURL = strings.TrimSpace(repoURL)
+	// Already SSH (git@host:path or host:path)
+	if strings.HasPrefix(repoURL, "git@") {
+		return repoURL, nil
+	}
+	if idx := strings.Index(repoURL, ":"); idx > 0 && !strings.Contains(repoURL[:idx], "/") && !strings.HasPrefix(repoURL, "http") {
+		return repoURL, nil
+	}
+	// GitHub HTTPS -> SSH
+	if strings.HasPrefix(repoURL, "https://github.com/") || strings.HasPrefix(repoURL, "http://github.com/") {
+		u, err := url.Parse(repoURL)
+		if err != nil {
+			return "", fmt.Errorf("invalid GitHub URL: %w", err)
+		}
+		path := strings.Trim(u.Path, "/")
+		path = strings.TrimSuffix(path, ".git")
+		if path == "" || !strings.Contains(path, "/") {
+			return "", fmt.Errorf("GitHub URL has no owner/repo path: %s", repoURL)
+		}
+		return "git@github.com:" + path + ".git", nil
+	}
+	// Generic HTTPS -> SSH (https://host/owner/repo -> git@host:owner/repo.git)
+	if strings.HasPrefix(repoURL, "https://") || strings.HasPrefix(repoURL, "http://") {
+		u, err := url.Parse(repoURL)
+		if err != nil {
+			return "", fmt.Errorf("invalid URL: %w", err)
+		}
+		path := strings.Trim(u.Path, "/")
+		path = strings.TrimSuffix(path, ".git")
+		if path == "" || !strings.Contains(path, "/") {
+			return "", fmt.Errorf("URL has no owner/repo path: %s", repoURL)
+		}
+		return "git@" + u.Host + ":" + path + ".git", nil
+	}
+	return "", fmt.Errorf("cannot convert to SSH: %s", repoURL)
+}
+
+func repoURLToHTTPS(repoURL string) (string, error) {
+	repoURL = strings.TrimSpace(repoURL)
+	// Already HTTPS
+	if strings.HasPrefix(repoURL, "https://") || strings.HasPrefix(repoURL, "http://") {
+		return repoURL, nil
+	}
+	// GitHub SSH -> HTTPS (git@github.com:owner/repo[.git] -> https://github.com/owner/repo)
+	if strings.HasPrefix(repoURL, "git@github.com:") {
+		path := strings.TrimPrefix(repoURL, "git@github.com:")
+		path = strings.TrimSuffix(path, ".git")
+		if path == "" || !strings.Contains(path, "/") {
+			return "", fmt.Errorf("GitHub SSH URL has no owner/repo path: %s", repoURL)
+		}
+		return "https://github.com/" + path, nil
+	}
+	// Generic SSH (host:owner/repo or git@host:owner/repo) -> HTTPS
+	if strings.HasPrefix(repoURL, "git@") {
+		rest := repoURL[len("git@"):]
+		idx := strings.Index(rest, ":")
+		if idx <= 0 {
+			return "", fmt.Errorf("SSH URL has no host:path: %s", repoURL)
+		}
+		host, path := rest[:idx], rest[idx+1:]
+		path = strings.TrimSuffix(path, ".git")
+		return "https://" + host + "/" + path, nil
+	}
+	if idx := strings.Index(repoURL, ":"); idx > 0 && !strings.Contains(repoURL[:idx], "/") {
+		host, path := repoURL[:idx], repoURL[idx+1:]
+		path = strings.TrimSuffix(path, ".git")
+		return "https://" + host + "/" + path, nil
+	}
+	return "", fmt.Errorf("cannot convert to HTTPS: %s", repoURL)
 }
 
 // forkURLFromUpstream returns the fork URL for the given username.
