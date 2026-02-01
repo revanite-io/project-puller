@@ -1,6 +1,6 @@
 module github.com/revanite-io/project-puller
 
-go 1.23.0
+go 1.25
 
 require (
 	github.com/ossf/si-tooling/v2 v2.2.0

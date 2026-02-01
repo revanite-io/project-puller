@@ -8,7 +8,7 @@ Clone or update all repositories listed in a [Security Insights](https://github.
 go install github.com/revanite-io/project-puller@latest
 ```
 
-Requires Go 1.23+ and a working `git` on your PATH.
+Requires Go 1.25+ and a working `git` on your PATH.
 
 ## Usage
 
