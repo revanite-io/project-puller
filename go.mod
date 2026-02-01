@@ -1,4 +1,4 @@
-module github.com/ossf/project-puller
+module github.com/revanite-io/project-puller
 
 go 1.23.0
 

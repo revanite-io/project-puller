@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ossf/project-puller/internal/load"
+	"github.com/revanite-io/project-puller/internal/load"
 	"github.com/ossf/si-tooling/v2/si"
 	"github.com/spf13/cobra"
 )
