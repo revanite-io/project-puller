@@ -62,3 +62,31 @@ project-puller --github org/project --output my-project --username yourname --ss
 ```
 
 After that, each repo has `upstream` (the project) and `origin` (your fork); clone and pull use `upstream`.
+
+## Troubleshooting
+
+**Command not found after install**
+
+The Go bin directory may not be on your `PATH`. Add it and confirm:
+
+```bash
+export PATH="$PATH:$(go env GOPATH)/bin"
+which project-puller
+project-puller --help
+```
+
+**I can't use `go install`**
+
+You can build the binary locally:
+
+```bash
+git clone git@github.com:revanite-io/project-puller.git
+cd project-puller
+go install .
+```
+
+Then add the binary `project-puller` to your path, or otherwise run it however you use similar CLI tools.
+
+## Contributing
+
+PRs are welcome. Questions and feature requests can be added via GitHub Issues.
