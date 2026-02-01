@@ -91,7 +91,7 @@ func run(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("repo %s: %w", repoURL, err)
 		}
-		dirName := repoDirName(r, repoURL, usedNames)
+		dirName := repoDirName(repoURL, usedNames)
 		usedNames[dirName] = true
 		targetPath := filepath.Join(dir, dirName)
 
@@ -114,14 +114,7 @@ func parseGitHubFlag(s string) (owner, repo, path string) {
 	return owner, repo, path
 }
 
-func repoDirName(r si.ProjectRepository, repoURL string, usedNames map[string]bool) string {
-	name := strings.TrimSpace(r.Name)
-	if name != "" {
-		dirName := sanitizeDirName(name)
-		if dirName != "" && !usedNames[dirName] {
-			return dirName
-		}
-	}
+func repoDirName(repoURL string, usedNames map[string]bool) string {
 	base := lastPathComponent(repoURL)
 	candidate := base
 	for i := 0; usedNames[candidate]; i++ {
@@ -132,15 +125,6 @@ func repoDirName(r si.ProjectRepository, repoURL string, usedNames map[string]bo
 		}
 	}
 	return candidate
-}
-
-func sanitizeDirName(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '/' || r == '\\' || r == 0 {
-			return -1
-		}
-		return r
-	}, s)
 }
 
 func lastPathComponent(url string) string {
