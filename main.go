@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,7 @@ var (
 	source   string
 	github   string
 	dir      string
+	username string
 	quiet    bool
 )
 
@@ -37,6 +39,7 @@ func init() {
 	rootCmd.Flags().StringVarP(&source, "source", "s", "", "Path to security-insights file or HTTP(S) URL")
 	rootCmd.Flags().StringVarP(&github, "github", "g", "", "Load from GitHub as owner/repo[/path] (e.g. org/repo or org/repo/dir/security-insights.yml)")
 	rootCmd.Flags().StringVarP(&dir, "output", "", "", "Target directory for cloned repositories")
+	rootCmd.Flags().StringVarP(&username, "username", "u", "", "Fork username; clone with remote upstream and add your fork as origin")
 	rootCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Suppress git output")
 }
 
@@ -86,7 +89,7 @@ func run(cmd *cobra.Command, args []string) error {
 		usedNames[dirName] = true
 		targetPath := filepath.Join(dir, dirName)
 
-		if err := cloneOrPull(targetPath, repoURL); err != nil {
+		if err := cloneOrPull(targetPath, repoURL, username); err != nil {
 			return fmt.Errorf("git failed for %s: %w", dirName, err)
 		}
 	}
@@ -142,7 +145,70 @@ func lastPathComponent(url string) string {
 	return url
 }
 
-func cloneOrPull(targetPath, repoURL string) error {
+// forkURLFromUpstream returns the fork URL for the given username.
+// Handles GitHub HTTPS, GitHub SSH, and generic host URLs (replaces first path segment with username).
+func forkURLFromUpstream(repoURL, username string) (string, error) {
+	repoURL = strings.TrimSpace(repoURL)
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return "", fmt.Errorf("username is empty")
+	}
+	// GitHub HTTPS: https://github.com/owner/repo[.git]
+	if strings.HasPrefix(repoURL, "https://github.com/") || strings.HasPrefix(repoURL, "http://github.com/") {
+		u, err := url.Parse(repoURL)
+		if err != nil {
+			return "", fmt.Errorf("invalid GitHub URL: %w", err)
+		}
+		path := strings.TrimPrefix(u.Path, "/")
+		path = strings.TrimSuffix(path, ".git")
+		parts := strings.SplitN(path, "/", 2)
+		if len(parts) < 2 {
+			return "", fmt.Errorf("GitHub URL has no owner/repo path: %s", repoURL)
+		}
+		u.Path = "/" + username + "/" + parts[1]
+		if strings.HasSuffix(repoURL, ".git") {
+			u.Path += ".git"
+		}
+		return u.String(), nil
+	}
+	// GitHub SSH: git@github.com:owner/repo[.git]
+	if strings.HasPrefix(repoURL, "git@github.com:") {
+		rest := strings.TrimPrefix(repoURL, "git@github.com:")
+		parts := strings.SplitN(rest, "/", 2)
+		if len(parts) < 2 {
+			return "", fmt.Errorf("GitHub SSH URL has no owner/repo path: %s", repoURL)
+		}
+		repo := strings.TrimSuffix(parts[1], ".git")
+		return "git@github.com:" + username + "/" + repo + ".git", nil
+	}
+	// Generic HTTPS: replace first path segment with username
+	if strings.HasPrefix(repoURL, "https://") || strings.HasPrefix(repoURL, "http://") {
+		u, err := url.Parse(repoURL)
+		if err != nil {
+			return "", fmt.Errorf("invalid URL: %w", err)
+		}
+		path := strings.Trim(u.Path, "/")
+		segments := strings.SplitN(path, "/", 2)
+		if len(segments) < 2 {
+			return "", fmt.Errorf("URL has no owner/repo path: %s", repoURL)
+		}
+		u.Path = "/" + username + "/" + segments[1]
+		return u.String(), nil
+	}
+	// Generic SSH: host:owner/repo -> host:username/repo
+	if idx := strings.Index(repoURL, ":"); idx > 0 && !strings.Contains(repoURL[:idx], "/") {
+		host := repoURL[:idx]
+		rest := repoURL[idx+1:]
+		parts := strings.SplitN(rest, "/", 2)
+		if len(parts) < 2 {
+			return "", fmt.Errorf("SSH URL has no owner/repo path: %s", repoURL)
+		}
+		return host + ":" + username + "/" + parts[1], nil
+	}
+	return "", fmt.Errorf("cannot derive fork URL from: %s", repoURL)
+}
+
+func cloneOrPull(targetPath, repoURL, username string) error {
 	gitDir := filepath.Join(targetPath, ".git")
 	exists := false
 	if fi, err := os.Stat(gitDir); err == nil && fi.IsDir() {
@@ -151,23 +217,78 @@ func cloneOrPull(targetPath, repoURL string) error {
 
 	if exists {
 		fmt.Fprintf(os.Stderr, "Pulling %s\n", targetPath)
-		c := exec.Command("git", "pull")
-		c.Dir = targetPath
-		if !quiet {
-			c.Stdout = os.Stdout
-			c.Stderr = os.Stderr
+		if username != "" {
+			if err := ensureUpstreamOriginRemotes(targetPath, repoURL, username); err != nil {
+				return err
+			}
+			// Pull from upstream (branch tracks upstream when we cloned with -o upstream, or we renamed origin->upstream)
+			return runGit(exec.Command("git", "pull", "upstream"), targetPath)
 		}
-		if err := c.Run(); err != nil {
+		return runGit(exec.Command("git", "pull"), targetPath)
+	}
+
+	if username != "" {
+		fmt.Fprintf(os.Stderr, "Cloning %s -> %s (upstream)\n", repoURL, targetPath)
+		if err := runGit(exec.Command("git", "clone", "-o", "upstream", repoURL, targetPath), "."); err != nil {
 			return err
 		}
-		return nil
+		forkURL, err := forkURLFromUpstream(repoURL, username)
+		if err != nil {
+			return err
+		}
+		return addOriginRemote(targetPath, forkURL)
 	}
 
 	fmt.Fprintf(os.Stderr, "Cloning %s -> %s\n", repoURL, targetPath)
-	c := exec.Command("git", "clone", repoURL, targetPath)
-	if !quiet {
-		c.Stdout = os.Stdout
-		c.Stderr = os.Stderr
+	return runGit(exec.Command("git", "clone", repoURL, targetPath), ".")
+}
+
+// ensureUpstreamOriginRemotes ensures upstream (project) and origin (fork) exist; normalizes repos cloned without --username.
+func ensureUpstreamOriginRemotes(targetPath, repoURL, username string) error {
+	hasUpstream := remoteExists(targetPath, "upstream")
+	hasOrigin := remoteExists(targetPath, "origin")
+
+	if hasUpstream && !hasOrigin {
+		forkURL, err := forkURLFromUpstream(repoURL, username)
+		if err != nil {
+			return err
+		}
+		return addOriginRemote(targetPath, forkURL)
 	}
-	return c.Run()
+	if !hasUpstream && hasOrigin {
+		// Repo was cloned without --username; origin is the project. Rename to upstream and add origin as fork.
+		if err := runGit(exec.Command("git", "remote", "rename", "origin", "upstream"), targetPath); err != nil {
+			return err
+		}
+		forkURL, err := forkURLFromUpstream(repoURL, username)
+		if err != nil {
+			return err
+		}
+		return addOriginRemote(targetPath, forkURL)
+	}
+	// Both exist or neither; if both exist we do nothing. If neither exists something is wrong; pull will fail.
+	return nil
+}
+
+func remoteExists(dir, name string) bool {
+	c := exec.Command("git", "remote", "get-url", name)
+	c.Dir = dir
+	c.Stdout = nil
+	c.Stderr = nil
+	return c.Run() == nil
+}
+
+// runGit runs cmd in dir, wiring stdout/stderr when !quiet.
+func runGit(cmd *exec.Cmd, dir string) error {
+	cmd.Dir = dir
+	if !quiet {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+	return cmd.Run()
+}
+
+// addOriginRemote adds remote "origin" with url in the repo at targetPath.
+func addOriginRemote(targetPath, url string) error {
+	return runGit(exec.Command("git", "remote", "add", "origin", url), targetPath)
 }
